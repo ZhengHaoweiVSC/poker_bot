@@ -22,8 +22,20 @@ GOOD_HANDS = [
 
 MAX_CALL = 31           # bad hands fold if the call is above this
 PAIR_MAX_CALL = 51     # pair-or-better postflop plays on if the call is at most this
+# Call limits that scale with the pot (used POT_SCALE_CHANCE of the time).
+# The old MAX_CALL / PAIR_MAX_CALL stay as a floor, so these can only raise the limits.
+POT_SCALE_CHANCE = 0.85
+MAX_CALL_POT_FRAC = 0.4        # bad hands call up to 50% of the pot
+PAIR_MAX_CALL_POT_FRAC = 1.0   # pair-or-better calls up to 100% of the pot
+# The other 20% of the time, pick a limit from these fixed sets instead.
+RANDOM_MAX_CALLS = (21, 31, 41, 61, 81, 101)
+RANDOM_PAIR_MAX_CALLS = (31, 51, 81, 101, 151, 201)
+
 RANDOM_RAISE_CHANCE = 0.15
 RANDOM_RAISE_SIZES = (111, 101, 91, 67, 51, 51, 51, 31, 21, 31, 31, 31, 16)
+
+# Facing a bet that is at least this fraction of our total chips counts as a shove.
+SHOVE_FRACTION = 0.4
 
 
 def parse_hand(code):
@@ -44,6 +56,24 @@ def card_rank(card) -> int:
     if r in FACE_RANKS:
         return FACE_RANKS[r]
     return int(r)
+
+
+def wide_call_hand(hole) -> bool:
+    """Rough 'beats a random hand ~50%+' range, used only when facing a shove."""
+    r1, r2 = card_rank(hole[0]), card_rank(hole[1])
+    hi, lo = max(r1, r2), min(r1, r2)
+    suited = hole[0].suit == hole[1].suit
+    if hi == lo:               # any pair
+        return True
+    if hi >= 13:               # any ace or king
+        return True
+    if hi == 12:               # queens
+        return suited or lo >= 6
+    if hi == 11:               # jacks
+        return lo >= 8 or (suited and lo >= 6)
+    if hi == 10:               # tens
+        return lo >= 8 or (suited and lo >= 7)
+    return suited and hi >= 9 and lo >= 7   # 98s, 97s
 
 
 def has_pair(hole, board) -> bool:
@@ -84,7 +114,7 @@ def made_hand(hole, board) -> bool:
         if n >= 5 and any(c.suit == s for c in hole):
             return True
 
-    # Straight that inclu hole card (ace counts high and low)
+    # Straight that includes a hole card (ace counts high and low)
     rank_set = set(counts)
     if 14 in rank_set:
         rank_set.add(1)
@@ -105,7 +135,8 @@ class Model:
     a call of 100 or less, raise an extra 20 (sometimes a random 100/50/25/10),
     else call.
     Good preflop hands: shove when a raise is possible, otherwise call.
-    Bad preflop hands: when the call is under 20, raise an extra 20 (else 10)
+    Bad preflop hands: when facing a shove, call with the wide range, else fold.
+    Otherwise, when the call is under 20, raise an extra 20 (else 10)
     if legal, otherwise call. Call exactly 20, fold above 20.
     """
 
@@ -126,6 +157,19 @@ class Model:
             self.fold_hand = key not in GOOD_SET
         except Exception:
             self.fold_hand = False
+
+    def call_limits(self, game_state):
+        """Return (max_call, pair_max_call) for this decision.
+
+        80% of the time both scale with the pot (never below the old constants).
+        Otherwise both come from the fixed random sets.
+        """
+        if random.random() < POT_SCALE_CHANCE:
+            pot = game_state.pot
+            max_call = max(MAX_CALL, int(MAX_CALL_POT_FRAC * pot))
+            pair_max_call = max(PAIR_MAX_CALL, int(PAIR_MAX_CALL_POT_FRAC * pot))
+            return max_call, pair_max_call
+        return random.choice(RANDOM_MAX_CALLS), random.choice(RANDOM_PAIR_MAX_CALLS)
 
     def min_raise(self, game_state):
         """Smallest legal raise_to total."""
@@ -178,6 +222,7 @@ class Model:
         try:
             postflop = len(game_state.board) >= 3
             call = game_state.call_amount
+            max_call, pair_max_call = self.call_limits(game_state)
 
             if postflop:
                 # Trips, straight, flush, full house or quads with a hole card
@@ -187,11 +232,22 @@ class Model:
                         return PlayerAction.raise_to(self.player_id, total)
                     return PlayerAction.call(self.player_id)
                 # Pair or better, cheap enough to continue
-                if has_pair(self.hand, game_state.board) and call <= PAIR_MAX_CALL:
+                if has_pair(self.hand, game_state.board) and call <= pair_max_call:
                     return self.pair_play(game_state)
 
+            # Preflop, facing a shove: call with the wide range, fold the rest.
+            # Hands in GOOD_HANDS skip this and use the shove/call logic below.
+            if not postflop and self.fold_hand:
+                me = self.player_id
+                total_chips = game_state.stacks[me] + game_state.bets[me]
+                facing_shove = call > 0 and call >= SHOVE_FRACTION * total_chips
+                if facing_shove:
+                    if wide_call_hand(self.hand):
+                        return PlayerAction.call(me)
+                    return PlayerAction.fold(me)
+
             if self.fold_hand:
-                if call > MAX_CALL:
+                if call > max_call:
                     return PlayerAction.fold(self.player_id)
                 if 0 < call < 20:
                     # raise an extra 20, else an extra 10, on top of the call
