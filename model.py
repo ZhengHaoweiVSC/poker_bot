@@ -2,37 +2,40 @@ from card_utils import Card
 from game_state import GameStateView
 from player_action import PlayerAction
 
-# 20 offsuit hands to fold (rank pairs; T=10, J=11, Q=12)
-TRASH_HANDS = {
-    # original 10
-    frozenset((7, 2)),
-    frozenset((8, 2)),
-    frozenset((6, 2)),
-    frozenset((7, 3)),
-    frozenset((8, 3)),
-    frozenset((9, 2)),
-    frozenset((9, 3)),
-    frozenset((10, 2)),
-    frozenset((11, 2)),
-    frozenset((3, 2)),
-    # 10 more
-    frozenset((4, 2)),
-    frozenset((5, 2)),
-    frozenset((4, 3)),
-    frozenset((5, 3)),
-    frozenset((6, 3)),
-    frozenset((7, 4)),
-    frozenset((8, 4)),
-    frozenset((9, 4)),
-    frozenset((10, 3)),
-    frozenset((12, 2)),
-}
+RANKS = "23456789TJQKA"
+RANK_VALUE = {ch: i + 2 for i, ch in enumerate(RANKS)}
+
+# 50 weak hand types to fold. Format: two ranks + "o" (offsuit) or "s" (suited).
+BAD_HANDS = [
+    # 42 offsuit
+    "32o", "42o", "43o", "52o", "53o", "54o",
+    "62o", "63o", "64o",
+    "72o", "73o", "74o", "75o",
+    "82o", "83o", "84o", "85o", "86o",
+    "92o", "93o", "94o", "95o", "96o", "97o",
+    "T2o", "T3o", "T4o", "T5o", "T6o", "T7o",
+    "J2o", "J3o", "J4o", "J5o", "J6o", "J7o",
+    "Q2o", "Q3o", "Q4o", "Q5o", "Q6o",
+    "K2o",
+    # 8 suited
+    "32s", "42s", "52s", "62s", "72s", "82s", "92s", "T2s",
+]
+
+
+def parse_hand(code):
+    a, b, kind = code[0], code[1], code[2]
+    hi = max(RANK_VALUE[a], RANK_VALUE[b])
+    lo = min(RANK_VALUE[a], RANK_VALUE[b])
+    return (hi, lo, kind == "s")
+
+
+BAD_SET = {parse_hand(code) for code in BAD_HANDS}
 
 FACE_RANKS = {"T": 10, "J": 11, "Q": 12, "K": 13, "A": 14}
 
 
 def card_rank(card) -> int:
-    """Return a card's rank as a number (2-14). Adjust if Card uses other names."""
+    """Return a card's rank as a number (2-14)."""
     r = getattr(card, "rank", None)
     if hasattr(r, "value"):
         r = r.value
@@ -43,80 +46,54 @@ def card_rank(card) -> int:
 
 class Model:
     """
-    Calls every hand, folds 20 weak offsuit hands, and tries to go all in
-    (once per hand) with pocket aces or kings, calling if a raise is not legal.
+    Folds 50 weak starting hands when facing a bet, goes all in with every
+    other hand when a raise is possible, and calls otherwise.
     """
 
     def __init__(self):
         self.hand = []
         self.player_id = None
         self.fold_hand = False
-        self.all_in = False
-        self.raised = False
 
     def seed(self, hand: list[Card], player_id: int):
         self.hand = hand
         self.player_id = player_id
         self.fold_hand = False
-        self.all_in = False
-        self.raised = False
         try:
             c1, c2 = hand
             r1, r2 = card_rank(c1), card_rank(c2)
-            offsuit = c1.suit != c2.suit
-            self.fold_hand = offsuit and frozenset((r1, r2)) in TRASH_HANDS
-            self.all_in = r1 == r2 and r1 in (14, 13)  # AA or KK
+            suited = c1.suit == c2.suit
+            key = (max(r1, r2), min(r1, r2), suited)
+            self.fold_hand = key in BAD_SET
         except Exception:
             self.fold_hand = False
-            self.all_in = False
 
-    def _read(self, game_state, names):
-        """Return the first value found under any of these names (calls it if it is a method)."""
-        for name in names:
-            value = getattr(game_state, name, None)
-            if value is None:
-                continue
-            if callable(value):
-                try:
-                    value = value(self.player_id)
-                except TypeError:
-                    try:
-                        value = value()
-                    except Exception:
-                        continue
-                except Exception:
-                    continue
-            return value
-        return None
-
-    def raise_target(self, game_state):
-        """Return the all-in amount if a raise is legal, else None."""
-        # GUESSED names: replace with the real ones from CLAUDE.md / game_state.py
-        allowed = self._read(game_state, ("can_raise", "raise_allowed", "can_bet"))
-        if allowed is not True:      # unknown or False: do not raise
+    def all_in_total(self, game_state):
+        """Return the raise_to amount for an all-in, or None if we cannot raise."""
+        me = self.player_id
+        chips_behind = game_state.stacks[me]
+        if chips_behind <= game_state.call_amount:
             return None
-        amount = self._read(game_state, ("max_raise_to", "all_in_amount", "max_raise"))
-        if isinstance(amount, (int, float)):
-            return amount
-        return None
+        others = [p for p in game_state.active_players if p != me]
+        if not others:
+            return None
+        total = int(game_state.bets[me] + chips_behind)
+        if total < game_state.min_raise_to:
+            return None
+        return total
 
-    def run(
-        self, actions: list[PlayerAction], game_state: GameStateView
-    ) -> PlayerAction:
+    def run(self, actions: list[PlayerAction], game_state: GameStateView) -> PlayerAction:
         try:
-            if self.all_in and not self.raised:
-                amount = self.raise_target(game_state)
-                if amount is not None:
-                    self.raised = True
-                    return PlayerAction.raise_to(self.player_id, amount)
-                return PlayerAction.call(self.player_id)  # cannot raise: call
-            if self.fold_hand and game_state.call_amount > 0:
-                return PlayerAction.fold(self.player_id)
-            return PlayerAction.call(self.player_id)  # call, or check if free
+            if self.fold_hand:
+                if game_state.call_amount > 0:
+                    return PlayerAction.fold(self.player_id)
+                return PlayerAction.call(self.player_id)
+            total = self.all_in_total(game_state)
+            if total is not None:
+                return PlayerAction.raise_to(self.player_id, total)
+            return PlayerAction.call(self.player_id)
         except Exception:
             return PlayerAction.call(self.player_id)
 
-    def end_game(
-        self, actions: list[PlayerAction], game_state: GameStateView
-    ):
+    def end_game(self, actions: list[PlayerAction], game_state: GameStateView):
         pass
