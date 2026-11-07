@@ -9,15 +9,13 @@ RANK_VALUE = {ch: i + 2 for i, ch in enumerate(RANKS)}
 # Pairs are written with "o", for example "AAo".
 GOOD_HANDS = [
     # 13 pairs
-    "AAo", "KKo", "QQo", "JJo", "TTo", "99o", "88o", "77o", "66o", "55o", "44o", "33o", "22o",
+    "AAo", "KKo", "QQo", "JJo", "TTo", "99o", "88o", "77o", "66o", "55o"
     # 12 suited aces
-    "AKs", "AQs", "AJs", "ATs", "A9s", "A8s", "A7s", "A6s", "A5s", "A4s", "A3s", "A2s",
+    "AKs", "AQs", "AJs"
     # 6 suited broadways
-    "KQs", "KJs", "KTs", "QJs", "QTs", "JTs",
+    "KQs",
     # 6 offsuit aces
-    "AKo", "AQo", "AJo", "ATo", "A9o", "A8o",
-    # 6 offsuit broadways
-    "KQo", "KJo", "KTo", "QJo", "QTo", "JTo",
+    "AKo", "AQo", "AJo"
 ]
 
 MAX_CALL = 20  # bad hands fold if the call is above this
