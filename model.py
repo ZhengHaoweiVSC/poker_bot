@@ -84,7 +84,7 @@ def made_hand(hole, board) -> bool:
         if n >= 5 and any(c.suit == s for c in hole):
             return True
 
-    # Straight that includes a hole card (ace counts high and low)
+    # Straight that inclu hole card (ace counts high and low)
     rank_set = set(counts)
     if 14 in rank_set:
         rank_set.add(1)
