@@ -22,8 +22,8 @@ GOOD_HANDS = [
 
 MAX_CALL = 31           # bad hands fold if the call is above this
 PAIR_MAX_CALL = 51     # pair-or-better postflop plays on if the call is at most this
-RANDOM_RAISE_CHANCE = 0.09
-RANDOM_RAISE_SIZES = (111, 101, 91, 67, 51, 31, 16)
+RANDOM_RAISE_CHANCE = 0.15
+RANDOM_RAISE_SIZES = (111, 101, 91, 67, 51, 51, 51, 31, 21, 31, 31, 31, 16)
 
 
 def parse_hand(code):
