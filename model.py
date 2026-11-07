@@ -12,7 +12,7 @@ class Model:
     """
 
     def __init__(self):
-        # Load weights, and set up anything you learn across hands (e.g.
+        # Lad weights, and set up anything you learn across hands (e.g.
         # about other teams, by game_state.teams), here.
         self.hand = []
         self.player_id = None
