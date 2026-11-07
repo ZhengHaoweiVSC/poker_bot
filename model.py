@@ -5,21 +5,22 @@ from player_action import PlayerAction
 RANKS = "23456789TJQKA"
 RANK_VALUE = {ch: i + 2 for i, ch in enumerate(RANKS)}
 
-# 50 weak hand types to fold. Format: two ranks + "o" (offsuit) or "s" (suited).
-BAD_HANDS = [
-    # 42 offsuit
-    "32o", "42o", "43o", "52o", "53o", "54o",
-    "62o", "63o", "64o",
-    "72o", "73o", "74o", "75o",
-    "82o", "83o", "84o", "85o", "86o",
-    "92o", "93o", "94o", "95o", "96o", "97o",
-    "T2o", "T3o", "T4o", "T5o", "T6o", "T7o",
-    "J2o", "J3o", "J4o", "J5o", "J6o", "J7o",
-    "Q2o", "Q3o", "Q4o", "Q5o", "Q6o",
-    "K2o",
-    # 8 suited
-    "32s", "42s", "52s", "62s", "72s", "82s", "92s", "T2s",
+# The 50 best hand types to shove. Format: two ranks + "s" (suited) or "o" (offsuit).
+# Pairs are written with "o", for example "AAo".
+GOOD_HANDS = [
+    # 13 pairs
+    "AAo", "KKo", "QQo", "JJo", "TTo", "99o", "88o", "77o", "66o", "55o", "44o", "33o", "22o",
+    # 12 suited aces
+    "AKs", "AQs", "AJs", "ATs", "A9s", "A8s", "A7s", "A6s", "A5s", "A4s", "A3s", "A2s",
+    # 6 suited broadways
+    "KQs", "KJs", "KTs", "QJs", "QTs", "JTs",
+    # 6 offsuit aces
+    "AKo", "AQo", "AJo", "ATo", "A9o", "A8o",
+    # 6 offsuit broadways
+    "KQo", "KJo", "KTo", "QJo", "QTo", "JTo",
 ]
+
+MAX_CALL = 20  # bad hands fold if the call is above this
 
 
 def parse_hand(code):
@@ -29,25 +30,69 @@ def parse_hand(code):
     return (hi, lo, kind == "s")
 
 
-BAD_SET = {parse_hand(code) for code in BAD_HANDS}
+GOOD_SET = {parse_hand(code) for code in GOOD_HANDS}
 
 FACE_RANKS = {"T": 10, "J": 11, "Q": 12, "K": 13, "A": 14}
 
 
 def card_rank(card) -> int:
     """Return a card's rank as a number (2-14)."""
-    r = getattr(card, "rank", None)
-    if hasattr(r, "value"):
-        r = r.value
-    if isinstance(r, str):
-        r = FACE_RANKS.get(r.upper()) or int(r)
-    return r
+    r = card.rank
+    if r in FACE_RANKS:
+        return FACE_RANKS[r]
+    return int(r)
+
+
+def made_hand(hole, board) -> bool:
+    """True if hole cards + board make trips, a straight, a flush, a full house
+    or quads, and at least one hole card is part of it."""
+    cards = list(hole) + list(board)
+    hole_ranks = {card_rank(c) for c in hole}
+
+    counts = {}
+    for c in cards:
+        r = card_rank(c)
+        counts[r] = counts.get(r, 0) + 1
+
+    # Quads or trips that include a hole card
+    for r, n in counts.items():
+        if n >= 3 and r in hole_ranks:
+            return True
+
+    # Full house made of board trips plus a hole-card pair
+    has_board_trips = any(n >= 3 for n in counts.values())
+    if has_board_trips and any(n >= 2 and r in hole_ranks for r, n in counts.items()):
+        return True
+
+    # Flush that includes a hole card
+    suits = {}
+    for c in cards:
+        suits[c.suit] = suits.get(c.suit, 0) + 1
+    for s, n in suits.items():
+        if n >= 5 and any(c.suit == s for c in hole):
+            return True
+
+    # Straight that includes a hole card (ace counts high and low)
+    rank_set = set(counts)
+    if 14 in rank_set:
+        rank_set.add(1)
+    hole_set = set(hole_ranks)
+    if 14 in hole_set:
+        hole_set.add(1)
+    for low in range(1, 11):
+        window = set(range(low, low + 5))
+        if window <= rank_set and window & hole_set:
+            return True
+
+    return False
 
 
 class Model:
     """
-    Folds 50 weak starting hands when facing a bet, goes all in with every
-    other hand when a raise is possible, and calls otherwise.
+    Postflop: all in when the hole cards help make trips or better.
+    Good hands: shove when a raise is possible, otherwise call.
+    Bad hands: when the call is under 20, raise an extra 20 (else 10) on top
+    of the call if legal, otherwise call. Call exactly 20, fold above 20.
     """
 
     def __init__(self):
@@ -64,30 +109,63 @@ class Model:
             r1, r2 = card_rank(c1), card_rank(c2)
             suited = c1.suit == c2.suit
             key = (max(r1, r2), min(r1, r2), suited)
-            self.fold_hand = key in BAD_SET
+            self.fold_hand = key not in GOOD_SET
         except Exception:
             self.fold_hand = False
+
+    def min_raise(self, game_state):
+        """Smallest legal raise_to total."""
+        try:
+            return int(game_state.min_raise_to)
+        except Exception:
+            pass
+        try:
+            return int(game_state.current_bet + game_state.last_raise)
+        except Exception:
+            return int(game_state.current_bet) + 20
+
+    def can_raise_to(self, game_state, total) -> bool:
+        me = self.player_id
+        if total <= game_state.current_bet:
+            return False
+        if total < self.min_raise(game_state):
+            return False
+        if total > game_state.bets[me] + game_state.stacks[me]:
+            return False
+        others = [p for p in game_state.active_players if p != me]
+        return len(others) > 0
 
     def all_in_total(self, game_state):
         """Return the raise_to amount for an all-in, or None if we cannot raise."""
         me = self.player_id
-        chips_behind = game_state.stacks[me]
-        if chips_behind <= game_state.call_amount:
+        if game_state.stacks[me] <= game_state.call_amount:
             return None
-        others = [p for p in game_state.active_players if p != me]
-        if not others:
-            return None
-        total = int(game_state.bets[me] + chips_behind)
-        if total < game_state.min_raise_to:
-            return None
-        return total
+        total = int(game_state.bets[me] + game_state.stacks[me])
+        if self.can_raise_to(game_state, total):
+            return total
+        return None
 
     def run(self, actions: list[PlayerAction], game_state: GameStateView) -> PlayerAction:
         try:
-            if self.fold_hand:
-                if game_state.call_amount > 0:
-                    return PlayerAction.fold(self.player_id)
+            # Postflop: all in with trips, straight, flush, full house or quads
+            if len(game_state.board) >= 3 and made_hand(self.hand, game_state.board):
+                total = self.all_in_total(game_state)
+                if total is not None:
+                    return PlayerAction.raise_to(self.player_id, total)
                 return PlayerAction.call(self.player_id)
+
+            if self.fold_hand:
+                call = game_state.call_amount
+                if call > MAX_CALL:
+                    return PlayerAction.fold(self.player_id)
+                if 0 < call < 20:
+                    # raise an extra 20, else an extra 10, on top of the call
+                    for extra in (20, 10):
+                        target = int(game_state.current_bet) + extra
+                        if self.can_raise_to(game_state, target):
+                            return PlayerAction.raise_to(self.player_id, target)
+                return PlayerAction.call(self.player_id)  # checks if call is 0
+
             total = self.all_in_total(game_state)
             if total is not None:
                 return PlayerAction.raise_to(self.player_id, total)
