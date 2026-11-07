@@ -1,3 +1,5 @@
+import random
+
 from card_utils import Card
 from game_state import GameStateView
 from player_action import PlayerAction
@@ -5,20 +7,23 @@ from player_action import PlayerAction
 RANKS = "23456789TJQKA"
 RANK_VALUE = {ch: i + 2 for i, ch in enumerate(RANKS)}
 
-# The 50 best hand types to shove. Format: two ranks + "s" (suited) or "o" (offsuit).
+# Hand types to shove. Format: two ranks + "s" (suited) or "o" (offsuit).
 # Pairs are written with "o", for example "AAo".
 GOOD_HANDS = [
-    # 13 pairs
-    "AAo", "KKo", "QQo", "JJo", "TTo", "99o", "88o", "77o", "66o", "55o"
-    # 12 suited aces
-    "AKs", "AQs", "AJs"
-    # 6 suited broadways
+    # pairs 55 and up
+    "AAo", "KKo", "QQo", "JJo", "TTo", "99o", "88o", "77o", "66o", "55o",
+    # suited aces
+    "AKs", "AQs", "AJs",
+    # suited broadway
     "KQs",
-    # 6 offsuit aces
-    "AKo", "AQo", "AJo"
+    # offsuit aces
+    "AKo", "AQo", "AJo",
 ]
 
-MAX_CALL = 20  # bad hands fold if the call is above this
+MAX_CALL = 31           # bad hands fold if the call is above this
+PAIR_MAX_CALL = 51     # pair-or-better postflop plays on if the call is at most this
+RANDOM_RAISE_CHANCE = 0.09
+RANDOM_RAISE_SIZES = (111, 101, 91, 67, 51, 31, 16)
 
 
 def parse_hand(code):
@@ -39,6 +44,15 @@ def card_rank(card) -> int:
     if r in FACE_RANKS:
         return FACE_RANKS[r]
     return int(r)
+
+
+def has_pair(hole, board) -> bool:
+    """True for a pocket pair, or when a hole card matches a board card."""
+    hole_ranks = [card_rank(c) for c in hole]
+    if len(hole_ranks) == 2 and hole_ranks[0] == hole_ranks[1]:
+        return True
+    board_ranks = {card_rank(c) for c in board}
+    return any(r in board_ranks for r in hole_ranks)
 
 
 def made_hand(hole, board) -> bool:
@@ -87,10 +101,12 @@ def made_hand(hole, board) -> bool:
 
 class Model:
     """
-    Postflop: all in when the hole cards help make trips or better.
-    Good hands: shove when a raise is possible, otherwise call.
-    Bad hands: when the call is under 20, raise an extra 20 (else 10) on top
-    of the call if legal, otherwise call. Call exactly 20, fold above 20.
+    Postflop: all in with trips or better (using a hole card). With a pair and
+    a call of 100 or less, raise an extra 20 (sometimes a random 100/50/25/10),
+    else call.
+    Good preflop hands: shove when a raise is possible, otherwise call.
+    Bad preflop hands: when the call is under 20, raise an extra 20 (else 10)
+    if legal, otherwise call. Call exactly 20, fold above 20.
     """
 
     def __init__(self):
@@ -143,17 +159,38 @@ class Model:
             return total
         return None
 
+    def pair_play(self, game_state):
+        """Pair or better, call at most 100: raise extra 20 (or a random size), else call."""
+        me = self.player_id
+        base = int(game_state.current_bet)
+        sizes = [20]
+        if random.random() < RANDOM_RAISE_CHANCE:
+            sizes = list(RANDOM_RAISE_SIZES)
+            random.shuffle(sizes)
+            sizes.append(20)  # fall back to 20 if the random sizes are not legal
+        for extra in sizes:
+            target = base + extra
+            if self.can_raise_to(game_state, target):
+                return PlayerAction.raise_to(me, target)
+        return PlayerAction.call(me)
+
     def run(self, actions: list[PlayerAction], game_state: GameStateView) -> PlayerAction:
         try:
-            # Postflop: all in with trips, straight, flush, full house or quads
-            if len(game_state.board) >= 3 and made_hand(self.hand, game_state.board):
-                total = self.all_in_total(game_state)
-                if total is not None:
-                    return PlayerAction.raise_to(self.player_id, total)
-                return PlayerAction.call(self.player_id)
+            postflop = len(game_state.board) >= 3
+            call = game_state.call_amount
+
+            if postflop:
+                # Trips, straight, flush, full house or quads with a hole card
+                if made_hand(self.hand, game_state.board):
+                    total = self.all_in_total(game_state)
+                    if total is not None:
+                        return PlayerAction.raise_to(self.player_id, total)
+                    return PlayerAction.call(self.player_id)
+                # Pair or better, cheap enough to continue
+                if has_pair(self.hand, game_state.board) and call <= PAIR_MAX_CALL:
+                    return self.pair_play(game_state)
 
             if self.fold_hand:
-                call = game_state.call_amount
                 if call > MAX_CALL:
                     return PlayerAction.fold(self.player_id)
                 if 0 < call < 20:
